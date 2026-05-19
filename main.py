@@ -1,12 +1,13 @@
 import sys
 import os
 import json
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QTextEdit, QFileDialog, 
-    QColorDialog, QMessageBox, QMenuBar, QStatusBar, QVBoxLayout, QWidget, QHBoxLayout, QPushButton
+from PyQt6.QtWidgets import ( 
+    QApplication, QMainWindow, QTextEdit, QFileDialog, QColorDialog, 
+    QMessageBox, QMenuBar, QVBoxLayout, QWidget, QHBoxLayout, 
+    QPushButton, QLabel 
 )
 from PyQt6.QtGui import QFont, QKeySequence, QAction, QColor
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QFileSystemWatcher
 
 SETTINGS_FILE = os.path.join(os.path.expanduser("~"), ".custom_notepad_settings.json")
 DEFAULT_FONT_SIZE = 11
@@ -24,6 +25,11 @@ class CustomNotepad(QMainWindow):
         self.font_size = DEFAULT_FONT_SIZE
         self.settings = self.load_settings()
 
+        # File watcher to detect external modifications
+        self.watcher = QFileSystemWatcher(self)
+        self.watcher.fileChanged.connect(self.on_file_changed_externally)
+        self.last_mtime = 0
+
         self._build_ui()
         self.apply_colors(
             self.settings.get("bg_color", "#1e1e1e"),
@@ -32,17 +38,19 @@ class CustomNotepad(QMainWindow):
 
     def _build_ui(self):
         central_widget = QWidget()
+        central_widget.setObjectName("CentralWidget")
         self.setCentralWidget(central_widget)
+        
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
         self._build_editor(main_layout)
         self._build_menu()
-        self._build_toolbar(main_layout)
-        self._build_statusbar()
+        self._build_bottom_bar(main_layout)
 
         self.update_title()
+        self.update_status_label()
 
     def _build_menu(self):
         menubar = self.menuBar()
@@ -73,7 +81,7 @@ class CustomNotepad(QMainWindow):
         self.wrap_action.triggered.connect(self.toggle_wrap)
         view_menu.addAction(self.wrap_action)
         view_menu.addSeparator()
-        self.add_action(view_menu, "Zoom In", "Ctrl++", self.zoom_in)
+        self.add_action(view_menu, "Zoom In", "Ctrl+=", self.zoom_in)
         self.add_action(view_menu, "Zoom Out", "Ctrl+-", self.zoom_out)
         self.add_action(view_menu, "Reset Zoom", "Ctrl+0", self.zoom_reset)
 
@@ -96,12 +104,26 @@ class CustomNotepad(QMainWindow):
         menu.addAction(action)
         return action
 
-    def _build_toolbar(self, layout):
-        toolbar_widget = QWidget()
-        toolbar_layout = QHBoxLayout(toolbar_widget)
-        toolbar_layout.setContentsMargins(4, 4, 4, 4)
-        toolbar_layout.setSpacing(4)
+    def _build_editor(self, layout):
+        self.text = QTextEdit()
+        self.text.setFont(QFont("Consolas", self.font_size))
+        self.text.textChanged.connect(self.on_modified)
+        self.text.cursorPositionChanged.connect(self.update_status_label)
+        layout.addWidget(self.text)
 
+    def _build_bottom_bar(self, layout):
+        # The new combined bar! 
+        bottom_widget = QWidget()
+        bottom_widget.setObjectName("BottomWidget")
+        bottom_layout = QHBoxLayout(bottom_widget)
+        bottom_layout.setContentsMargins(8, 6, 8, 6)
+        bottom_layout.setSpacing(10)
+
+        # Status Label on the left
+        self.status_label = QLabel("Ln 1, Col 1")
+        bottom_layout.addWidget(self.status_label)
+
+        # Toolbar buttons beside it
         buttons = [
             ("New", self.new_file),
             ("Open", self.open_file),
@@ -112,23 +134,13 @@ class CustomNotepad(QMainWindow):
 
         for text, cmd in buttons:
             btn = QPushButton(text)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(cmd)
-            toolbar_layout.addWidget(btn)
+            bottom_layout.addWidget(btn)
         
-        toolbar_layout.addStretch()
-        layout.addWidget(toolbar_widget)
-
-    def _build_editor(self, layout):
-        self.text = QTextEdit()
-        self.text.setFont(QFont("Consolas", self.font_size))
-        self.text.textChanged.connect(self.on_modified)
-        self.text.cursorPositionChanged.connect(self.update_cursor_position)
-        layout.addWidget(self.text)
-
-    def _build_statusbar(self):
-        self.status = QStatusBar()
-        self.setStatusBar(self.status)
-        self.status.showMessage("Ln 1, Col 1")
+        # Pushes everything to the left
+        bottom_layout.addStretch()
+        layout.addWidget(bottom_widget)
 
     # ── Zoom ──────────────────────────────────────────────────────────────────
 
@@ -148,7 +160,7 @@ class CustomNotepad(QMainWindow):
         font = self.text.font()
         font.setPointSize(self.font_size)
         self.text.setFont(font)
-        self.status.showMessage(f"Zoom: {self.font_size}pt", 2000)
+        self.update_status_label()
 
     def wheelEvent(self, event):
         """Ctrl+Scroll also zooms, just like Notepad/browsers."""
@@ -181,20 +193,61 @@ class CustomNotepad(QMainWindow):
         except Exception:
             pass
 
-    # ── Colors ────────────────────────────────────────────────────────────────
+    # ── Colors & Global Styling ───────────────────────────────────────────────
 
     def apply_colors(self, bg, fg):
         self.settings["bg_color"] = bg
         self.settings["fg_color"] = fg
-        style = f"background-color: {bg}; color: {fg}; selection-background-color: #4a6984; border: none;"
-        self.text.setStyleSheet(style)
+        
+        # This styles all the "main" things universally!
+        style = f"""
+            QMainWindow, #CentralWidget, #BottomWidget, QTextEdit, QLabel, QMenuBar, QMenu {{
+                background-color: {bg};
+                color: {fg};
+            }}
+            QTextEdit {{
+                selection-background-color: #4a6984;
+                border: none;
+                padding-left: 10px;
+            }}
+            QPushButton {{
+                border: 1px solid {fg};
+                padding: 4px 12px;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                background-color: #4a6984;
+                color: #ffffff;
+                border: 1px solid #4a6984;
+            }}
+            QMenuBar::item:selected, QMenu::item:selected {{
+                background-color: #4a6984;
+                color: #ffffff;
+            }}
+            QScrollBar:vertical {{
+                background: {bg};
+                width: 12px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {fg};
+                min-height: 20px;
+                border-radius: 6px;
+                margin: 2px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+        """
+        self.setStyleSheet(style)
 
     def reset_theme(self):
         self.apply_colors("#1e1e1e", "#f2f2f2")
         self.save_settings()
 
     def choose_bg_color(self):
-        # FIX: seed dialog with the CURRENT background color instead of hardcoded black
         current = QColor(self.settings.get("bg_color", "#1e1e1e"))
         color = QColorDialog.getColor(current, self, "Choose background color")
         if color.isValid():
@@ -202,7 +255,6 @@ class CustomNotepad(QMainWindow):
             self.save_settings()
 
     def choose_fg_color(self):
-        # FIX: seed dialog with the CURRENT text color instead of hardcoded white
         current = QColor(self.settings.get("fg_color", "#f2f2f2"))
         color = QColorDialog.getColor(current, self, "Choose text color")
         if color.isValid():
@@ -215,7 +267,64 @@ class CustomNotepad(QMainWindow):
         else:
             self.text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
 
-    # ── File ops ──────────────────────────────────────────────────────────────
+    # ── File ops & Watcher ────────────────────────────────────────────────────
+
+    def update_watcher(self):
+        """Updates the File Watcher so it only monitors the current file."""
+        if self.watcher.files():
+            self.watcher.removePaths(self.watcher.files())
+        if self.current_file and os.path.exists(self.current_file):
+            self.watcher.addPath(self.current_file)
+            self.last_mtime = os.path.getmtime(self.current_file)
+
+    def on_file_changed_externally(self, path):
+        """Triggered when another program modifies the opened file."""
+        if path != self.current_file or not os.path.exists(path):
+            return
+            
+        try:
+            current_mtime = os.path.getmtime(path)
+        except Exception:
+            return
+
+        if current_mtime == self.last_mtime:
+            return
+            
+        if not self.text.document().isModified():
+            self.reload_file()
+        else:
+            reply = QMessageBox.question(
+                self, "File Modified",
+                f"The file '{os.path.basename(path)}' has been modified by another program.\nDo you want to reload it and lose your unsaved changes?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                self.reload_file()
+            else:
+                self.last_mtime = current_mtime
+
+    def reload_file(self):
+        if not self.current_file or not os.path.exists(self.current_file):
+            return
+        try:
+            with open(self.current_file, "r", encoding="utf-8-sig") as f:
+                content = f.read()
+            
+            cursor = self.text.textCursor()
+            pos = cursor.position()
+            v_scroll = self.text.verticalScrollBar().value()
+
+            self.text.setPlainText(content)
+            self.text.document().setModified(False)
+            self.update_title()
+            self.update_watcher()
+
+            cursor.setPosition(min(pos, len(self.text.toPlainText())))
+            self.text.setTextCursor(cursor)
+            self.text.verticalScrollBar().setValue(v_scroll)
+        except Exception as e:
+            QMessageBox.critical(self, "Reload failed", f"Could not reload file:\n{e}")
 
     def closeEvent(self, event):
         if self.confirm_discard_changes():
@@ -245,6 +354,7 @@ class CustomNotepad(QMainWindow):
         self.current_file = None
         self.text.document().setModified(False)
         self.update_title()
+        self.update_watcher()
 
     def open_file(self):
         if not self.confirm_discard_changes():
@@ -253,12 +363,13 @@ class CustomNotepad(QMainWindow):
         if not path:
             return
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 content = f.read()
             self.text.setPlainText(content)
             self.current_file = path
             self.text.document().setModified(False)
             self.update_title()
+            self.update_watcher()
         except Exception as e:
             QMessageBox.critical(self, "Open failed", f"Could not open file:\n{e}")
 
@@ -266,14 +377,20 @@ class CustomNotepad(QMainWindow):
         if self.current_file is None:
             return self.save_as()
         try:
+            if self.watcher.files():
+                self.watcher.removePaths(self.watcher.files())
+
             content = self.text.toPlainText()
             with open(self.current_file, "w", encoding="utf-8") as f:
                 f.write(content)
+
             self.text.document().setModified(False)
             self.update_title()
+            self.update_watcher()
             return True
         except Exception as e:
             QMessageBox.critical(self, "Save failed", f"Could not save file:\n{e}")
+            self.update_watcher()
             return False
 
     def save_as(self):
@@ -291,11 +408,11 @@ class CustomNotepad(QMainWindow):
         star = "*" if self.text.document().isModified() else ""
         self.setWindowTitle(f"{name}{star} - Custom Notepad")
 
-    def update_cursor_position(self):
+    def update_status_label(self):
         cursor = self.text.textCursor()
         line = cursor.blockNumber() + 1
         col = cursor.columnNumber() + 1
-        self.status.showMessage(f"Ln {line}, Col {col}")
+        self.status_label.setText(f"Ln {line}, Col {col}   |   Zoom: {self.font_size}pt")
 
     def show_about(self):
         QMessageBox.information(
@@ -303,8 +420,9 @@ class CustomNotepad(QMainWindow):
             "Custom Notepad\n\nA simple text editor built with Python and PyQt6.\nIt supports plain text only, with customizable background and text colors."
         )
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
+
+if __name__ == "__main__": 
+    app = QApplication(sys.argv) 
     notepad = CustomNotepad()
-    notepad.show()
+    notepad.show() 
     sys.exit(app.exec())
